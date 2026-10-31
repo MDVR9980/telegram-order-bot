@@ -1,0 +1,27 @@
+{
+  "currency": "تومان",
+  "_comment": "قیمت نهایی = قیمت سبک × ضریب سایز × ضریب تعداد چهره + هزینه نوع تحویل. همه قیمت‌ها به تومان و فقط نمونه هستند؛ قبل از اجرا عوضشان کنید.",
+  "styles": [
+    {"id": "pencil", "title": "✏️ سیاه‌قلم / مدادی", "description": "طراحی واقع‌گرایانه با مداد و سایه‌روشن دقیق", "price": 450000},
+    {"id": "charcoal", "title": "🖤 زغال", "description": "کنتراست بالا و حس دراماتیک", "price": 550000},
+    {"id": "color", "title": "🎨 مداد رنگی", "description": "پرتره رنگی با جزئیات بالا", "price": 750000},
+    {"id": "digital", "title": "💻 دیجیتال", "description": "نقاشی دیجیتال با رزولوشن بالا", "price": 650000}
+  ],
+  "sizes": [
+    {"id": "a5", "title": "A5 (۱۵×۲۱)", "multiplier": 1.0},
+    {"id": "a4", "title": "A4 (۲۱×۳۰)", "multiplier": 1.4},
+    {"id": "a3", "title": "A3 (۳۰×۴۲)", "multiplier": 2.0}
+  ],
+  "faces": [
+    {"id": "1", "title": "👤 یک نفر", "multiplier": 1.0},
+    {"id": "2", "title": "👥 دو نفر", "multiplier": 1.7},
+    {"id": "3", "title": "👨‍👩‍👧 سه نفر", "multiplier": 2.3},
+    {"id": "4", "title": "👨‍👩‍👧‍👦 چهار نفر و بیشتر", "multiplier": 3.0}
+  ],
+  "deliveries": [
+    {"id": "digital", "title": "📁 فقط فایل دیجیتال + موکاپ", "price": 0, "needs_address": false},
+    {"id": "physical", "title": "📦 اصل اثر + ارسال پستی", "price": 150000, "needs_address": true},
+    {"id": "frame", "title": "🖼 اصل اثر با قاب + ارسال پستی", "price": 400000, "needs_address": true}
+  ],
+  "max_reference_photos": 5
+}
