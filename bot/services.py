@@ -145,12 +145,13 @@ async def submit_receipt(bot: Bot, user_id: int, order_id: int, file_id: str, fi
 
 
 # ---------- referrals ----------
-async def _notify_referrer(bot: Bot, referrer_id: int) -> None:
+async def _notify_referrer(bot: Bot, referrer_id: int, purchased: bool) -> None:
     percent = fa(await referral_percent())
+    event = "اولین سفارشش را در لینوریا ثبت کرد" if purchased else "با لینک شما به لینوریا پیوست"
     await _tell(
         bot,
         referrer_id,
-        f"🎉 یکی از دوستانتان با لینک شما به لینوریا پیوست!\n"
+        f"🎉 یکی از دوستانی که دعوت کرده بودید {event}!\n"
         f"🎁 یک کد تخفیف <b>{percent}٪</b> به حساب شما اضافه شد و روی سفارش بعدی‌تان خودکار اعمال می‌شود.",
     )
 
@@ -169,11 +170,11 @@ async def register_referral(bot: Bot, user_id: int, payload: str, is_new: bool) 
     if await setting("referral_mode") == "join":
         rewarded = await db.reward_referrer(user_id)
         if rewarded:
-            await _notify_referrer(bot, rewarded)
+            await _notify_referrer(bot, rewarded, purchased=False)
 
 
 async def on_payment_approved(bot: Bot, order: dict) -> None:
     if await setting("referral_mode") != "join":
         rewarded = await db.reward_referrer(order["user_id"])
         if rewarded:
-            await _notify_referrer(bot, rewarded)
+            await _notify_referrer(bot, rewarded, purchased=True)

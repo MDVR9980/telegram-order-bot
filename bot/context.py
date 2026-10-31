@@ -16,7 +16,7 @@ DEFAULT_SETTINGS = {
     "delivery_time": "۲ تا ۱۲ ساعت",
     "orders_open": "1",
     "referral_percent": "10",
-    "referral_mode": "join",      # join = as soon as the friend starts the bot | purchase = after friend's first paid order
+    "referral_mode": "purchase",  # purchase = after friend's first paid order (abuse-resistant) | join = as soon as the friend starts the bot
 }
 
 
