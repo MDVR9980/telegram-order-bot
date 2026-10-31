@@ -1,6 +1,7 @@
 """Admin panel: payment review, preview/final delivery, messaging, settings, broadcast, admins."""
 import asyncio
 import logging
+import re
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
@@ -11,9 +12,11 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from .. import keyboards as kb
 from ..callbacks import Adm, MyOrder
-from ..context import DEFAULT_SETTINGS, catalog, db, setting
+from ..context import DEFAULT_SETTINGS, db, setting
 from ..db import Status
 from ..filters import IsAdmin
+from ..services import cancel_order, on_payment_approved, set_quote
+from ..texts import payment_text
 from ..states import AdminFlow
 from ..utils import (
     esc,
@@ -22,6 +25,8 @@ from ..utils import (
     is_super,
     money,
     order_card_admin,
+    parse_price,
+    safe_edit,
     send_files,
     to_en_digits,
     user_lock,
@@ -32,13 +37,6 @@ log = logging.getLogger(__name__)
 router = Router(name="admin")
 router.message.filter(IsAdmin())
 router.callback_query.filter(IsAdmin())
-
-
-async def _safe_edit(message: Message, text: str, markup=None):
-    try:
-        await message.edit_text(text, reply_markup=markup)
-    except TelegramBadRequest:
-        await message.answer(text, reply_markup=markup)
 
 
 async def _notify_user(bot: Bot, user_id: int, text: str, markup=None) -> bool:
@@ -56,6 +54,7 @@ async def panel_text_markup(user_id: int):
     open_ = await setting("orders_open") == "1"
     text = (
         "🛠 <b>پنل مدیریت لینوریا</b>\n\n"
+        f"🧮 منتظر تعیین قیمت: <b>{fa(counts['quote'])}</b>\n"
         f"🔎 رسید در انتظار بررسی: <b>{fa(counts['review'])}</b>\n"
         f"🎨 در حال انجام: <b>{fa(counts['work'])}</b>\n"
         f"👀 منتظر نظر مشتری: <b>{fa(counts['preview'])}</b>"
@@ -74,7 +73,7 @@ async def panel(message: Message, state: FSMContext):
 async def panel_cb(call: CallbackQuery, state: FSMContext):
     await state.clear()
     text, markup = await panel_text_markup(call.from_user.id)
-    await _safe_edit(call.message, text, markup)
+    await safe_edit(call.message, text, markup)
     await call.answer()
 
 
@@ -91,14 +90,17 @@ PAGE = 10
 
 @router.callback_query(Adm.filter(F.action == "list"))
 async def order_list(call: CallbackQuery, callback_data: Adm):
-    key, _, page = callback_data.arg.partition(":")
-    page = int(page or 0)
+    key, _, page = callback_data.arg.partition("~")
+    page = int(page) if page.isdigit() else 0
+    if key not in kb.ORDER_FILTERS:
+        await call.answer()
+        return
     title, statuses = kb.ORDER_FILTERS[key]
     orders = await db.orders_by_status(statuses, limit=PAGE + 1, offset=page * PAGE)
     has_next = len(orders) > PAGE
     orders = orders[:PAGE]
     text = f"{title}\n\n" + ("سفارشی در این بخش نیست ✨" if not orders else "روی سفارش بزنید:")
-    await _safe_edit(call.message, text, kb.admin_list_kb(orders, key, page, has_next))
+    await safe_edit(call.message, text, kb.admin_list_kb(orders, key, page, has_next))
     await call.answer()
 
 
@@ -107,10 +109,11 @@ async def _send_order_card(target: Message, order_id: int, edit: bool = False):
     if not order:
         await target.answer(f"❌ سفارش #{order_id} پیدا نشد.")
         return
+    text = order_card_admin(order, await db.order_extra(order))
     if edit:
-        await _safe_edit(target, order_card_admin(order), kb.admin_order_kb(order))
+        await safe_edit(target, text, kb.admin_order_kb(order))
     else:
-        await target.answer(order_card_admin(order), reply_markup=kb.admin_order_kb(order))
+        await target.answer(text, reply_markup=kb.admin_order_kb(order))
 
 
 @router.callback_query(Adm.filter(F.action == "view"))
@@ -165,23 +168,91 @@ async def show_receipt(call: CallbackQuery, callback_data: Adm, bot: Bot):
     await send_files(bot, call.from_user.id, files[-1:], caption=f"🧾 آخرین رسید سفارش #{callback_data.order_id}")
 
 
+# ---------- pricing ----------
+async def _send_quote(bot: Bot, order: dict) -> bool:
+    intro = (
+        f"✨ سفارش <b>#{fa(order['id'])}</b> بررسی شد و قیمت آن مشخص شد!\n\n"
+        if not order.get("reject_reason") else ""
+    )
+    return await _notify_user(bot, order["user_id"], intro + await payment_text(order), kb.pay_kb(order["id"]))
+
+
+async def _apply_quote(bot: Bot, order_id: int, base_price: int) -> tuple[bool, str]:
+    before = await db.get_order(order_id)
+    order = await set_quote(order_id, base_price)
+    if not order:
+        return False, "⚠️ قیمت این سفارش دیگر قابل تغییر نیست (احتمالاً پرداخت شده یا لغو شده)."
+    sent = await _send_quote(bot, order)
+    changed = before and before["status"] == Status.AWAITING_PAYMENT
+    msg = f"✅ قیمت سفارش #{order_id} {'تغییر کرد' if changed else 'ثبت شد'}: {money(order['price'])}"
+    if order["discount_amount"]:
+        kind = "دعوت دوستان" if order["discount_kind"] == "referral" else f"کد {order['discount_code']}"
+        msg += f"\n🎁 با تخفیف {kind} (مبلغ پایه: {money(order['base_price'])})"
+    if not sent:
+        msg += "\n⚠️ ارسال پیام به مشتری ناموفق بود (احتمالاً ربات را بلاک کرده)."
+    return True, msg
+
+
+@router.callback_query(Adm.filter(F.action == "quote"))
+async def quote(call: CallbackQuery, callback_data: Adm, bot: Bot):
+    order = await db.get_order(callback_data.order_id)
+    if not order or order["status"] != Status.AWAITING_QUOTE:
+        await call.answer("قیمت این سفارش قبلاً تعیین شده است.", show_alert=True)
+        await _send_order_card(call.message, callback_data.order_id, edit=True)
+        return
+    ok, msg = await _apply_quote(bot, order["id"], int(callback_data.arg))
+    await call.answer("✅ قیمت ارسال شد" if ok else "⚠️ ناموفق")
+    await call.message.answer(msg)
+    await _send_order_card(call.message, order["id"], edit=True)
+
+
+@router.callback_query(Adm.filter(F.action == "quote_custom"))
+async def quote_custom(call: CallbackQuery, callback_data: Adm, state: FSMContext):
+    order = await db.get_order(callback_data.order_id)
+    if not order or order["status"] not in (Status.AWAITING_QUOTE, Status.AWAITING_PAYMENT):
+        await call.answer("قیمت این سفارش دیگر قابل تغییر نیست.", show_alert=True)
+        return
+    await state.set_state(AdminFlow.custom_price)
+    await state.update_data(order_id=order["id"])
+    await call.message.answer(
+        f"✍️ مبلغ سفارش #{order['id']} را به <b>تومان</b> بفرستید.\n"
+        "مثال: <code>320000</code> یا فقط <code>320</code> (یعنی ۳۲۰ هزار تومان)\n"
+        f"<i>(تخفیف دعوت، اگر مشتری داشته باشد، خودکار کم می‌شود)</i>",
+        reply_markup=kb.abort_kb(),
+    )
+    await call.answer()
+
+
+@router.message(AdminFlow.custom_price, F.text)
+async def quote_custom_got(message: Message, state: FSMContext, bot: Bot):
+    price = parse_price(message.text)
+    if not price:
+        await message.answer("⚠️ مبلغ نامعتبر است. فقط عدد بفرستید، مثلاً <code>350</code> یا <code>350000</code>.")
+        return
+    data = await state.get_data()
+    await state.clear()
+    _, msg = await _apply_quote(bot, data["order_id"], price)
+    await message.answer(msg)
+    await _send_order_card(message, data["order_id"])
+
+
 # ---------- payment review ----------
 @router.callback_query(Adm.filter(F.action == "approve"))
 async def approve(call: CallbackQuery, callback_data: Adm, bot: Bot):
-    order = await db.get_order(callback_data.order_id)
-    if not order or order["status"] not in (Status.PAYMENT_REVIEW, Status.AWAITING_PAYMENT):
+    if not await db.transition(callback_data.order_id, (Status.PAYMENT_REVIEW, Status.AWAITING_PAYMENT), Status.IN_PROGRESS):
         await call.answer("این سفارش قبلاً بررسی شده است.", show_alert=True)
         await _send_order_card(call.message, callback_data.order_id, edit=True)
         return
-    await db.set_status(order["id"], Status.IN_PROGRESS)
+    order = await db.get_order(callback_data.order_id)
     delivery_time = await setting("delivery_time")
     await _notify_user(
         bot,
         order["user_id"],
         f"🎉 پرداخت سفارش <b>#{fa(order['id'])}</b> تایید شد!\n\n"
-        f"🎨 هنرمند ما کار روی اثر شما را شروع کرد.\n⏱ زمان تقریبی آماده‌سازی: <b>{esc(delivery_time)}</b>\n\n"
+        f"🎨 کار روی اثر شما شروع شد.\n⏱ زمان تقریبی آماده‌سازی: <b>{esc(delivery_time)}</b>\n\n"
         "به محض آماده شدن، پیش‌نمایش برایتان ارسال می‌شود 🤍",
     )
+    await on_payment_approved(bot, order)
     await call.answer("✅ پرداخت تایید شد")
     await _send_order_card(call.message, order["id"], edit=True)
 
@@ -202,12 +273,11 @@ async def reject(call: CallbackQuery, callback_data: Adm, state: FSMContext):
 
 
 async def _do_reject(bot: Bot, order_id: int, reason: str) -> bool:
-    order = await db.get_order(order_id)
-    if not order or order["status"] != Status.PAYMENT_REVIEW:
+    if not await db.transition(order_id, (Status.PAYMENT_REVIEW,), Status.AWAITING_PAYMENT, reject_reason=reason):
         return False
-    await db.set_status(order_id, Status.AWAITING_PAYMENT, reject_reason=reason)
+    order = await db.get_order(order_id)
     b = InlineKeyboardBuilder()
-    b.button(text="💳 ارسال مجدد رسید", callback_data=MyOrder(action="pay", order_id=order_id))
+    b.button(text="📸 ارسال مجدد رسید", callback_data=MyOrder(action="pay", order_id=order_id))
     await _notify_user(
         bot,
         order["user_id"],
@@ -221,10 +291,14 @@ async def _do_reject(bot: Bot, order_id: int, reason: str) -> bool:
 
 @router.callback_query(AdminFlow.reject_reason, Adm.filter(F.action == "reject_quick"))
 async def reject_quick(call: CallbackQuery, callback_data: Adm, state: FSMContext, bot: Bot):
-    reason = kb.REJECT_REASONS[int(callback_data.arg)]
+    try:
+        reason = kb.REJECT_REASONS[int(callback_data.arg)]
+    except (ValueError, IndexError):
+        await call.answer()
+        return
     await state.clear()
     ok = await _do_reject(bot, callback_data.order_id, reason)
-    await call.message.edit_text(f"❌ رسید سفارش #{callback_data.order_id} رد شد.\nدلیل: {esc(reason)}" if ok else "این سفارش قبلاً بررسی شده است.")
+    await safe_edit(call.message, f"❌ رسید سفارش #{callback_data.order_id} رد شد.\nدلیل: {esc(reason)}" if ok else "این سفارش قبلاً بررسی شده است.")
     await call.answer()
 
 
@@ -245,9 +319,8 @@ async def cancel_ask(call: CallbackQuery, callback_data: Adm):
 
 @router.callback_query(Adm.filter(F.action == "cancel_yes"))
 async def cancel_yes(call: CallbackQuery, callback_data: Adm, bot: Bot):
-    order = await db.get_order(callback_data.order_id)
-    if order and order["status"] in Status.ACTIVE:
-        await db.set_status(order["id"], Status.CANCELLED)
+    order = await cancel_order(callback_data.order_id, Status.ACTIVE)
+    if order:
         await _notify_user(
             bot, order["user_id"],
             f"❌ سفارش <b>#{fa(order['id'])}</b> لغو شد.\nبرای اطلاعات بیشتر با پشتیبانی در تماس باشید.",
@@ -260,7 +333,7 @@ async def cancel_yes(call: CallbackQuery, callback_data: Adm, bot: Bot):
 @router.callback_query(Adm.filter(F.action == "upload"))
 async def upload_start(call: CallbackQuery, callback_data: Adm, state: FSMContext):
     order = await db.get_order(callback_data.order_id)
-    if not order or order["status"] not in (Status.IN_PROGRESS, Status.REVISION, Status.PREVIEW_SENT, Status.PREVIEW_APPROVED):
+    if not order or order["status"] not in Status.WORKING:
         await call.answer("این سفارش در مرحله تحویل نیست.", show_alert=True)
         return
     kind = callback_data.arg
@@ -270,7 +343,7 @@ async def upload_start(call: CallbackQuery, callback_data: Adm, state: FSMContex
     tip = (
         "💡 پیشنهاد: پیش‌نمایش را با واترمارک یا کیفیت پایین‌تر بفرستید."
         if kind == "preview"
-        else "💡 برای حفظ کیفیت، فایل اصلی را به صورت Document بفرستید (موکاپ‌ها را هم می‌توانید اضافه کنید)."
+        else "💡 برای اینکه مشتری بتواند با کیفیت کامل چاپ کند، فایل اصلی را حتماً به صورت <b>File (Document)</b> بفرستید، نه عکس معمولی (تلگرام عکس‌ها را فشرده می‌کند)."
     )
     await call.message.answer(
         f"{what} سفارش #{order['id']} را بفرستید (عکس یا فایل، چند تا هم می‌شود).\n"
@@ -312,6 +385,10 @@ async def upload_done(call: CallbackQuery, state: FSMContext, bot: Bot):
     if not order or not files:
         await call.answer("فایلی دریافت نشده.", show_alert=True)
         return
+    if order["status"] not in Status.WORKING:
+        await state.clear()
+        await call.answer("این سفارش دیگر در مرحله تحویل نیست.", show_alert=True)
+        return
     await state.clear()
     await call.message.edit_reply_markup(reply_markup=None)
     oid = order["id"]
@@ -330,7 +407,9 @@ async def upload_done(call: CallbackQuery, state: FSMContext, bot: Bot):
             text = (
                 f"🎉 <b>اثر هنری شما تحویل داده شد!</b> (سفارش #{fa(oid)})\n\n"
                 + (f"💬 {esc(note)}\n\n" if note else "")
-                + "از اینکه لینوریا را انتخاب کردید ممنونیم 🤍\n"
+                + "📁 این فایل با کیفیت بالاست و می‌توانید آن را روی کاغذ عکس، تخته‌شاسی یا بوم <b>چاپ</b> کنید.\n"
+                "💡 برای حفظ کیفیت، فایل را از تلگرام <b>دانلود</b> کنید و همان را برای چاپ بدهید (نه اسکرین‌شات).\n\n"
+                "از اینکه لینوریا را انتخاب کردید ممنونیم 🤍\n"
                 "فایل‌ها همیشه از «📦 سفارش‌های من» قابل دریافت دوباره هستند.\n\n"
                 "⭐️ لطفاً به کار ما امتیاز دهید:"
             )
@@ -343,7 +422,7 @@ async def upload_done(call: CallbackQuery, state: FSMContext, bot: Bot):
 
     for f in files:
         await db.add_file(oid, kind, f["file_id"], f["file_type"])
-    await db.set_status(oid, new_status)
+    await db.transition(oid, Status.WORKING, new_status)
     await call.answer("✅ ارسال شد")
     await call.message.answer("✅ برای مشتری ارسال شد.")
     await _send_order_card(call.message, oid)
@@ -408,18 +487,18 @@ async def stats(call: CallbackQuery):
     rating = fa(s["avg_rating"]) if s["avg_rating"] else "—"
     text = (
         "📊 <b>آمار ربات</b>\n\n"
-        f"👥 کاربران: <b>{fa(s['users'])}</b>\n"
+        f"👥 کاربران: <b>{fa(s['users'])}</b> (دعوت‌شده: {fa(s['referred'])})\n"
         f"🧾 کل سفارش‌ها: <b>{fa(s['orders'])}</b>\n"
         f"🆕 سفارش‌های ۲۴ ساعت اخیر: <b>{fa(s['today'])}</b>\n"
         f"🎨 سفارش‌های فعال: <b>{fa(s['active'])}</b>\n"
-        f"🔎 رسید در انتظار: <b>{fa(s['review'])}</b>\n"
         f"✅ تحویل شده: <b>{fa(s['delivered'])}</b>\n"
-        f"💰 درآمد (پرداخت‌های تایید شده): <b>{money(s['revenue'])}</b>\n"
+        f"💰 درآمد کل (پرداخت‌های تایید شده): <b>{money(s['revenue'])}</b>\n"
+        f"📅 درآمد ۳۰ روز اخیر: <b>{money(s['revenue_30'])}</b>\n"
         f"⭐️ میانگین امتیاز: <b>{rating}</b>"
     )
     b = InlineKeyboardBuilder()
     b.button(text="🔙 پنل مدیریت", callback_data=Adm(action="panel"))
-    await _safe_edit(call.message, text, b.as_markup())
+    await safe_edit(call.message, text, b.as_markup())
     await call.answer()
 
 
@@ -429,19 +508,19 @@ async def toggle_open(call: CallbackQuery):
     new = "0" if await setting("orders_open") == "1" else "1"
     await db.set_setting("orders_open", new)
     text, markup = await panel_text_markup(call.from_user.id)
-    await _safe_edit(call.message, text, markup)
+    await safe_edit(call.message, text, markup)
     await call.answer("پذیرش سفارش باز شد 🟢" if new == "1" else "پذیرش سفارش بسته شد 🔴")
 
 
 # ---------- settings ----------
 async def _settings_markup():
-    values = {k: await setting(k) for k in kb.SETTING_LABELS}
+    values = {k: await setting(k) for k in (*kb.SETTING_LABELS, "referral_mode")}
     return kb.settings_kb(values)
 
 
 @router.callback_query(Adm.filter(F.action == "settings"))
 async def settings(call: CallbackQuery):
-    await _safe_edit(call.message, "⚙️ <b>تنظیمات</b>\nبرای ویرایش روی هر مورد بزنید:", await _settings_markup())
+    await safe_edit(call.message, "⚙️ <b>تنظیمات</b>\nبرای ویرایش روی هر مورد بزنید:", await _settings_markup())
     await call.answer()
 
 
@@ -453,28 +532,56 @@ async def set_start(call: CallbackQuery, callback_data: Adm, state: FSMContext):
     await state.set_state(AdminFlow.setting_value)
     await state.update_data(key=callback_data.arg)
     current = await setting(callback_data.arg)
-    await call.message.answer(
-        f"{kb.SETTING_LABELS[callback_data.arg]}\nمقدار فعلی: <code>{esc(current)}</code>\n\nمقدار جدید را بفرستید:",
-        reply_markup=kb.abort_kb(),
-    )
+    if callback_data.arg == "welcome_text":
+        prompt = (
+            "👋 متن خوش‌آمد جدید را بفرستید. می‌توانید از <b>بولد</b>، <i>ایتالیک</i> و ایموجی استفاده کنید.\n"
+            "به جای <code>{name}</code> اسم مشتری قرار می‌گیرد.\n"
+            "برای برگشت به متن پیش‌فرض، فقط <code>-</code> بفرستید."
+        )
+    else:
+        prompt = f"{kb.SETTING_LABELS[callback_data.arg]}\nمقدار فعلی: <code>{esc(current)}</code>\n\nمقدار جدید را بفرستید:"
+    await call.message.answer(prompt, reply_markup=kb.abort_kb())
     await call.answer()
 
 
 @router.message(AdminFlow.setting_value, F.text)
 async def set_value(message: Message, state: FSMContext):
     data = await state.get_data()
+    key = data["key"]
+    value = message.text.strip()[:200]
+    if key == "welcome_text":
+        value = "" if value == "-" else message.html_text[:3000]
+    elif key == "support_username":
+        value = value.lstrip("@").split("/")[-1]
+        if not re.fullmatch(r"[A-Za-z0-9_]{4,32}", value):
+            await message.answer("⚠️ آیدی نامعتبر است. مثال: <code>LinoriaSupport</code>")
+            return
+    elif key == "channel_url":
+        if value.startswith("@"):
+            value = f"https://t.me/{value[1:]}"
+        if not value.startswith(("https://", "http://")):
+            await message.answer("⚠️ لینک باید با https:// یا @ شروع شود.")
+            return
+    elif key == "referral_percent":
+        value = to_en_digits(value).replace("%", "").replace("٪", "").strip()
+        if not value.isdigit() or not 0 <= int(value) <= 90:
+            await message.answer("⚠️ یک عدد بین ۰ تا ۹۰ بفرستید (۰ یعنی تخفیف دعوت غیرفعال).")
+            return
     await state.clear()
-    await db.set_setting(data["key"], message.text.strip()[:200])
+    await db.set_setting(key, value)
     await message.answer("✅ ذخیره شد.", reply_markup=await _settings_markup())
 
 
-@router.callback_query(Adm.filter(F.action == "reload_catalog"))
-async def reload_catalog(call: CallbackQuery):
-    try:
-        catalog.reload()
-        await call.answer("✅ تعرفه‌ها از catalog.json بارگذاری شد", show_alert=True)
-    except Exception as e:  # noqa: BLE001
-        await call.answer(f"⚠️ خطا در catalog.json: {e}"[:190], show_alert=True)
+@router.callback_query(Adm.filter(F.action == "toggle_ref_mode"))
+async def toggle_ref_mode(call: CallbackQuery):
+    new = "purchase" if await setting("referral_mode") == "join" else "join"
+    await db.set_setting("referral_mode", new)
+    await safe_edit(call.message, "⚙️ <b>تنظیمات</b>\nبرای ویرایش روی هر مورد بزنید:", await _settings_markup())
+    await call.answer(
+        "از این به بعد تخفیف به محض عضویت دوست داده می‌شود." if new == "join"
+        else "از این به بعد تخفیف بعد از اولین خرید دوست داده می‌شود (ضد سوءاستفاده).",
+        show_alert=True,
+    )
 
 
 # ---------- broadcast ----------
@@ -535,7 +642,7 @@ async def admins(call: CallbackQuery):
         await call.answer("فقط سوپر ادمین", show_alert=True)
         return
     text, markup = await _admins_view()
-    await _safe_edit(call.message, text, markup)
+    await safe_edit(call.message, text, markup)
     await call.answer()
 
 
@@ -578,5 +685,5 @@ async def del_admin(call: CallbackQuery, callback_data: Adm):
         return
     await db.remove_admin(int(callback_data.arg))
     text, markup = await _admins_view()
-    await _safe_edit(call.message, text, markup)
+    await safe_edit(call.message, text, markup)
     await call.answer("حذف شد")

@@ -49,6 +49,18 @@ def fmt_time(ts: str) -> str:
         return ts
 
 
+async def safe_edit(message: Message, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
+    """Edit a bot message; ignore 'not modified', fall back to a new message if editing is impossible."""
+    from aiogram.exceptions import TelegramBadRequest
+
+    try:
+        await message.edit_text(text, reply_markup=markup)
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            return
+        await message.answer(text, reply_markup=markup)
+
+
 # ---------- per-user locks (albums arrive as parallel updates) ----------
 _locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
@@ -113,34 +125,104 @@ async def notify_admins(
             log.warning("could not notify admin %s: %s", admin_id, e)
 
 
+# ---------- prices ----------
+def parse_price(text: str) -> int | None:
+    """'320' / '320000' / '۳۲۰ هزار' / '320,000' -> toman. Numbers below 10,000 are read as thousands."""
+    digits = "".join(ch for ch in to_en_digits(text) if ch.isdigit())
+    if not digits or len(digits) > 10:
+        return None
+    value = int(digits)
+    if value < 10_000:
+        value *= 1000
+    return value if value > 0 else None
+
+
+def apply_discount(base: int, percent: int) -> int:
+    if percent <= 0:
+        return base
+    return int(round(base * (100 - percent) / 100 / 1000.0)) * 1000
+
+
 # ---------- order text ----------
+def price_lines(order: dict) -> list[str]:
+    if order.get("price") is None:
+        return ["💰 مبلغ: <i>بعد از بررسی عکس‌ها اعلام می‌شود</i>"]
+    if order.get("discount_amount"):
+        if order.get("discount_kind") == "referral":
+            label = f"🎁 تخفیف دعوت دوستان ({fa(order['discount_percent'])}٪)"
+        else:
+            how = f"{fa(order['discount_percent'])}٪" if order.get("discount_percent") else "مبلغ ثابت"
+            label = f"🎟 کد تخفیف {esc(order.get('discount_code'))} ({how})"
+        return [
+            f"💰 مبلغ: <s>{money(order['base_price'])}</s>",
+            f"{label}: −{money(order['discount_amount'])}",
+            f"💳 مبلغ نهایی: <b>{money(order['price'])}</b>",
+        ]
+    return [f"💳 مبلغ: <b>{money(order['price'])}</b>"]
+
+
 def order_lines(order: dict) -> list[str]:
-    style = catalog.style(order["style"])
-    size = catalog.size(order["size"])
-    faces = catalog.face(order["faces"])
-    delivery = catalog.delivery(order["delivery"])
+    style = catalog.style(order["style"], include_hidden=True)
+    faces = catalog.face(order["faces"], include_hidden=True)
     lines = [
-        f"🎨 سبک: <b>{esc(style.title if style else order['style'])}</b>",
-        f"📐 سایز: <b>{esc(size.title if size else order['size'])}</b>",
-        f"👤 تعداد چهره: <b>{esc(faces.title if faces else order['faces'])}</b>",
-        f"🚚 تحویل: <b>{esc(delivery.title if delivery else order['delivery'])}</b>",
+        f"🎨 نوع اثر: <b>{esc(style.title if style else order['style'])}</b>",
+        f"👤 تعداد افراد: <b>{esc(faces.title if faces else order['faces'])}</b>",
     ]
     if order.get("description"):
         lines.append(f"📝 توضیحات: {esc(order['description'])}")
-    if order.get("phone"):
-        lines.append(f"📞 تلفن: <code>{esc(order['phone'])}</code>")
-    if order.get("address"):
-        lines.append(f"🏠 آدرس: {esc(order['address'])}")
-    lines.append(f"💰 مبلغ: <b>{money(order['price'])}</b>")
-    return lines
+    return lines + price_lines(order)
+
+
+STAGES = [
+    ("ثبت سفارش", ()),
+    ("تعیین قیمت", (Status.AWAITING_QUOTE,)),
+    ("پرداخت و تایید رسید", (Status.AWAITING_PAYMENT, Status.PAYMENT_REVIEW)),
+    ("طراحی اثر", (Status.IN_PROGRESS, Status.REVISION)),
+    ("پیش‌نمایش و تایید شما", (Status.PREVIEW_SENT,)),
+    ("تحویل فایل نهایی", (Status.PREVIEW_APPROVED,)),
+]
+_STAGE_INDEX = {st: i for i, (_, sts) in enumerate(STAGES) for st in sts}
+
+NEXT_STEP = {
+    Status.AWAITING_QUOTE: "🧮 در حال بررسی عکس‌ها هستیم؛ قیمت به‌زودی برایتان ارسال می‌شود.",
+    Status.AWAITING_PAYMENT: "💳 مبلغ را واریز کنید و با دکمه زیر عکس رسید را بفرستید.",
+    Status.PAYMENT_REVIEW: "🔎 رسید شما در حال بررسی است.",
+    Status.IN_PROGRESS: "🎨 هنرمند در حال کشیدن اثر شماست.",
+    Status.REVISION: "✏️ در حال اعمال اصلاحات درخواستی شما هستیم.",
+    Status.PREVIEW_SENT: "👀 پیش‌نمایش ارسال شده؛ لطفاً تایید کنید یا درخواست اصلاح بدهید.",
+    Status.PREVIEW_APPROVED: "📤 فایل نهایی به‌زودی برایتان ارسال می‌شود.",
+    Status.DELIVERED: "🎁 اثر شما تحویل داده شده است. از دکمه زیر می‌توانید فایل‌ها را دوباره دریافت کنید.",
+    Status.CANCELLED: "این سفارش لغو شده است.",
+}
+
+
+def progress_tracker(status: str) -> str:
+    if status == Status.CANCELLED:
+        return "❌ <b>لغو شده</b>"
+    current = len(STAGES) if status == Status.DELIVERED else _STAGE_INDEX.get(status, 0)
+    lines = []
+    for i, (title, _) in enumerate(STAGES):
+        if i < current:
+            icon = "✅"
+        elif i == current:
+            icon = "🔄"
+        else:
+            icon = "⚪️"
+        lines.append(f"{icon} {title}")
+    return "\n".join(lines)
 
 
 def order_card_user(order: dict) -> str:
     head = [
-        f"🧾 <b>سفارش #{fa(order['id'])}</b>",
-        f"وضعیت: {Status.label(order['status'])}",
+        f"🧾 <b>سفارش شماره #{fa(order['id'])}</b>",
         f"🕒 ثبت: {fmt_time(order['created_at'])}",
         "",
+        "<b>📍 مراحل سفارش:</b>",
+        progress_tracker(order["status"]),
+        "",
+        f"👈 {NEXT_STEP.get(order['status'], '')}",
+        "",
+        "<b>📋 جزئیات:</b>",
     ]
     tail = []
     if order["status"] == Status.AWAITING_PAYMENT and order.get("reject_reason"):
@@ -148,16 +230,30 @@ def order_card_user(order: dict) -> str:
     return "\n".join(head + order_lines(order) + tail)
 
 
-def order_card_admin(order: dict) -> str:
+def order_card_admin(order: dict, extra: dict | None = None) -> str:
+    """Full details for admins. `extra` (optional): file counts and customer history."""
     uname = f"@{order['username']}" if order.get("username") else "—"
     head = [
         f"🧾 <b>سفارش #{order['id']}</b> — {Status.label(order['status'])}",
+        "",
         f"👤 مشتری: <a href=\"tg://user?id={order['user_id']}\">{esc(order.get('full_name'))}</a> ({esc(uname)})",
         f"🆔 <code>{order['user_id']}</code>",
-        f"🕒 {fmt_time(order['created_at'])}",
+    ]
+    if extra:
+        head.append(f"📚 سوابق مشتری: {fa(extra['user_orders'])} سفارش، {fa(extra['user_paid'])} پرداخت‌شده")
+    head += [
+        f"🕒 ثبت: {fmt_time(order['created_at'])}",
+        f"🔄 آخرین تغییر: {fmt_time(order['updated_at'])}",
         "",
     ]
     tail = []
+    if extra:
+        tail.append(
+            f"\n📎 فایل‌ها: {fa(extra['reference'])} عکس مشتری • {fa(extra['receipt'])} رسید • "
+            f"{fa(extra['preview'])} پیش‌نمایش • {fa(extra['final'])} فایل نهایی"
+        )
+    if order["status"] == Status.AWAITING_PAYMENT and order.get("reject_reason"):
+        tail.append(f"\n⚠️ آخرین رسید رد شد: {esc(order['reject_reason'])}")
     if order.get("rating"):
         tail.append(f"\n⭐️ امتیاز مشتری: {'⭐️' * order['rating']}")
     return "\n".join(head + order_lines(order) + tail)

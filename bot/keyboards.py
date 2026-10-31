@@ -8,7 +8,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from .callbacks import Adm, MyOrder, Nav, Pick, Preview, Rate
 from .catalog import Option
-from .config import config
+from .context import catalog
 from .db import Status
 from .utils import fa, money
 
@@ -19,6 +19,7 @@ BTN_PRICES = "💰 تعرفه‌ها"
 BTN_SAMPLES = "🖼 نمونه‌کارها"
 BTN_HELP = "📖 راهنما"
 BTN_SUPPORT = "💬 پشتیبانی"
+BTN_INVITE = "🎁 دعوت دوستان (تخفیف)"
 BTN_ADMIN = "🛠 پنل مدیریت"
 BTN_CANCEL = "❌ انصراف"
 
@@ -28,7 +29,7 @@ def main_menu(is_admin: bool = False) -> ReplyKeyboardMarkup:
         [KeyboardButton(text=BTN_ORDER)],
         [KeyboardButton(text=BTN_MY_ORDERS), KeyboardButton(text=BTN_PRICES)],
         [KeyboardButton(text=BTN_SAMPLES), KeyboardButton(text=BTN_HELP)],
-        [KeyboardButton(text=BTN_SUPPORT)],
+        [KeyboardButton(text=BTN_INVITE), KeyboardButton(text=BTN_SUPPORT)],
     ]
     if is_admin:
         rows.append([KeyboardButton(text=BTN_ADMIN)])
@@ -39,24 +40,11 @@ def cancel_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=BTN_CANCEL)]], resize_keyboard=True)
 
 
-def phone_menu() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📱 ارسال شماره من", request_contact=True)],
-            [KeyboardButton(text=BTN_CANCEL)],
-        ],
-        resize_keyboard=True,
-    )
-
-
 # ---------- order wizard ----------
-def options_kb(field: str, options: list[Option], with_back: bool = True, show_price: bool = False) -> InlineKeyboardMarkup:
+def options_kb(field: str, options: list[Option], with_back: bool = True) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for o in options:
-        text = o.title
-        if show_price and o.price:
-            text += f" — از {money(o.price)}" if field == "style" else f" (+{money(o.price)})"
-        kb.button(text=text, callback_data=Pick(field=field, value=o.id))
+        kb.button(text=o.title, callback_data=Pick(field=field, value=o.id))
     kb.adjust(1)
     nav = []
     if with_back:
@@ -86,7 +74,7 @@ def skip_kb() -> InlineKeyboardMarkup:
 
 def confirm_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ تایید و پرداخت", callback_data=Nav(action="confirm"))
+    kb.button(text="✅ ثبت نهایی سفارش", callback_data=Nav(action="confirm"))
     kb.button(text="✏️ شروع دوباره", callback_data=Nav(action="edit"))
     kb.button(text="✖️ انصراف", callback_data=Nav(action="cancel"))
     kb.adjust(1, 2)
@@ -98,7 +86,7 @@ def my_orders_kb(orders: list[dict]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for o in orders:
         kb.button(
-            text=f"#{fa(o['id'])} • {Status.label(o['status'])}",
+            text=f"سفارش #{fa(o['id'])} • {Status.label(o['status'])}",
             callback_data=MyOrder(action="view", order_id=o["id"]),
         )
     kb.adjust(1)
@@ -110,6 +98,8 @@ def my_order_kb(order: dict) -> InlineKeyboardMarkup:
     oid = order["id"]
     if order["status"] == Status.AWAITING_PAYMENT:
         kb.button(text="💳 پرداخت و ارسال رسید", callback_data=MyOrder(action="pay", order_id=oid))
+        kb.button(text="🎟 کد تخفیف دارم", callback_data=MyOrder(action="promo", order_id=oid))
+    if order["status"] in (Status.AWAITING_QUOTE, Status.AWAITING_PAYMENT):
         kb.button(text="🗑 لغو سفارش", callback_data=MyOrder(action="cancel", order_id=oid))
     if order["status"] == Status.PREVIEW_SENT:
         kb.button(text="👍 تایید پیش‌نمایش", callback_data=Preview(action="ok", order_id=oid))
@@ -123,7 +113,34 @@ def my_order_kb(order: dict) -> InlineKeyboardMarkup:
 
 def pay_kb(order_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    kb.button(text="📸 ارسال عکس رسید", callback_data=MyOrder(action="pay", order_id=order_id))
+    kb.button(text="🎟 کد تخفیف دارم", callback_data=MyOrder(action="promo", order_id=order_id))
     kb.button(text="🗑 لغو سفارش", callback_data=MyOrder(action="cancel", order_id=order_id))
+    kb.adjust(1, 2)
+    return kb.as_markup()
+
+
+def cancel_order_confirm_kb(order_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ بله، لغو شود", callback_data=MyOrder(action="cancel_yes", order_id=order_id))
+    kb.button(text="🔙 خیر", callback_data=MyOrder(action="view", order_id=order_id))
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+def receipt_pick_kb(orders: list[dict]) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for o in orders:
+        kb.button(text=f"🧾 رسید سفارش #{fa(o['id'])} ({money(o['price'])})", callback_data=MyOrder(action="receipt_for", order_id=o["id"]))
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def invite_kb(link: str, share_text: str) -> InlineKeyboardMarkup:
+    from urllib.parse import quote
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📤 ارسال لینک برای دوستان", url=f"https://t.me/share/url?url={quote(link)}&text={quote(share_text)}")
     return kb.as_markup()
 
 
@@ -143,30 +160,33 @@ def rate_kb(order_id: int) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def support_kb() -> InlineKeyboardMarkup:
+def support_kb(username: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="✉️ ارسال پیام از طریق ربات", callback_data="support:write")
-    kb.button(text=f"💬 چت با @{config.support_username}", url=f"https://t.me/{config.support_username}")
+    if username:
+        kb.button(text=f"💬 چت با @{username}", url=f"https://t.me/{username}")
     kb.adjust(1)
     return kb.as_markup()
 
 
-def samples_kb() -> InlineKeyboardMarkup | None:
-    if not config.channel_url:
+def samples_kb(channel_url: str) -> InlineKeyboardMarkup | None:
+    if not channel_url.startswith(("https://", "http://", "tg://")):
         return None
     kb = InlineKeyboardBuilder()
-    kb.button(text="🖼 مشاهده نمونه‌کارها در کانال", url=config.channel_url)
+    kb.button(text="🖼 مشاهده نمونه‌کارها در کانال", url=channel_url)
     return kb.as_markup()
 
 
 # ---------- admin ----------
 ORDER_FILTERS = {
+    "quote": ("🧮 منتظر قیمت", (Status.AWAITING_QUOTE,)),
     "review": ("🔎 رسیدهای در انتظار", (Status.PAYMENT_REVIEW,)),
     "work": ("🎨 در حال انجام", (Status.IN_PROGRESS, Status.REVISION, Status.PREVIEW_APPROVED)),
     "preview": ("👀 منتظر نظر مشتری", (Status.PREVIEW_SENT,)),
     "unpaid": ("⏳ پرداخت نشده", (Status.AWAITING_PAYMENT,)),
     "done": ("✅ تحویل شده", (Status.DELIVERED,)),
     "cancelled": ("❌ لغو شده", (Status.CANCELLED,)),
+    "all": ("📋 همه سفارش‌ها", tuple(Status.LABELS)),
 }
 
 
@@ -177,6 +197,8 @@ def admin_panel_kb(counts: dict[str, int], is_super: bool, orders_open: bool) ->
     kb.button(text="🔍 جستجوی سفارش", callback_data=Adm(action="find"))
     kb.button(text="📊 آمار", callback_data=Adm(action="stats"))
     kb.button(text="📣 پیام همگانی", callback_data=Adm(action="broadcast"))
+    kb.button(text="🎨 خدمات و قیمت‌ها", callback_data=Adm(action="catalog"))
+    kb.button(text="🎟 کدهای تخفیف", callback_data=Adm(action="promos"))
     kb.button(text="⚙️ تنظیمات", callback_data=Adm(action="settings"))
     kb.button(
         text="🟢 پذیرش سفارش: باز" if orders_open else "🔴 پذیرش سفارش: بسته",
@@ -184,7 +206,7 @@ def admin_panel_kb(counts: dict[str, int], is_super: bool, orders_open: bool) ->
     )
     if is_super:
         kb.button(text="👥 مدیریت ادمین‌ها", callback_data=Adm(action="admins"))
-    kb.adjust(2, 2, 2, 2, 2, 1, 1)
+    kb.adjust(1, 2, 2, 2, 1, 2, 2, 2, 1, 1, 1)
     return kb.as_markup()
 
 
@@ -196,9 +218,9 @@ def admin_list_kb(orders: list[dict], filter_key: str, page: int, has_next: bool
     kb.adjust(1)
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="◀️ قبلی", callback_data=Adm(action="list", arg=f"{filter_key}:{page - 1}").pack()))
+        nav.append(InlineKeyboardButton(text="◀️ قبلی", callback_data=Adm(action="list", arg=f"{filter_key}~{page - 1}").pack()))
     if has_next:
-        nav.append(InlineKeyboardButton(text="بعدی ▶️", callback_data=Adm(action="list", arg=f"{filter_key}:{page + 1}").pack()))
+        nav.append(InlineKeyboardButton(text="بعدی ▶️", callback_data=Adm(action="list", arg=f"{filter_key}~{page + 1}").pack()))
     if nav:
         kb.row(*nav)
     kb.row(InlineKeyboardButton(text="🔙 پنل مدیریت", callback_data=Adm(action="panel").pack()))
@@ -208,18 +230,27 @@ def admin_list_kb(orders: list[dict], filter_key: str, page: int, has_next: bool
 def admin_order_kb(order: dict) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     oid, st = order["id"], order["status"]
+    if st == Status.AWAITING_QUOTE:
+        for p in catalog.quick_prices:
+            kb.button(text=f"💰 {fa(f'{p // 1000:,}')} هزار", callback_data=Adm(action="quote", order_id=oid, arg=str(p)))
+        kb.button(text="✍️ مبلغ دلخواه", callback_data=Adm(action="quote_custom", order_id=oid))
     if st == Status.PAYMENT_REVIEW:
         kb.button(text="✅ تایید پرداخت", callback_data=Adm(action="approve", order_id=oid))
         kb.button(text="❌ رد رسید", callback_data=Adm(action="reject", order_id=oid))
         kb.button(text="🧾 مشاهده رسید", callback_data=Adm(action="receipt", order_id=oid))
     elif st == Status.AWAITING_PAYMENT:
         kb.button(text="✅ تایید دستی پرداخت", callback_data=Adm(action="approve", order_id=oid))
-    if st in (Status.IN_PROGRESS, Status.REVISION, Status.PREVIEW_SENT, Status.PREVIEW_APPROVED):
+        kb.button(text="✏️ تغییر قیمت", callback_data=Adm(action="quote_custom", order_id=oid))
+    if st in Status.WORKING:
         kb.button(text="👀 ارسال پیش‌نمایش", callback_data=Adm(action="upload", order_id=oid, arg="preview"))
         kb.button(text="📤 تحویل فایل نهایی", callback_data=Adm(action="upload", order_id=oid, arg="final"))
+    kb.button(text="🖼 عکس‌های مشتری", callback_data=Adm(action="files", order_id=oid, arg="reference"))
+    if st not in (Status.AWAITING_QUOTE, Status.AWAITING_PAYMENT, Status.PAYMENT_REVIEW):
+        kb.button(text="🧾 رسید پرداخت", callback_data=Adm(action="receipt", order_id=oid))
+    if st in (Status.PREVIEW_SENT, Status.REVISION, Status.PREVIEW_APPROVED, Status.DELIVERED):
+        kb.button(text="👀 پیش‌نمایش‌ها", callback_data=Adm(action="files", order_id=oid, arg="preview"))
     if st == Status.DELIVERED:
         kb.button(text="📁 فایل‌های تحویلی", callback_data=Adm(action="files", order_id=oid, arg="final"))
-    kb.button(text="🖼 عکس‌های مشتری", callback_data=Adm(action="files", order_id=oid, arg="reference"))
     kb.button(text="💬 پیام به مشتری", callback_data=Adm(action="msg", order_id=oid))
     if st in Status.ACTIVE:
         kb.button(text="🗑 لغو سفارش", callback_data=Adm(action="cancel", order_id=oid))
@@ -278,14 +309,22 @@ SETTING_LABELS = {
     "card_holder": "👤 نام صاحب کارت",
     "bank_name": "🏦 نام بانک",
     "delivery_time": "⏱ زمان آماده‌سازی",
+    "referral_percent": "🎁 درصد تخفیف دعوت",
+    "support_username": "💬 آیدی پشتیبانی",
+    "channel_url": "📢 لینک کانال",
+    "welcome_text": "👋 متن خوش‌آمد",
 }
 
 
 def settings_kb(values: dict[str, str]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for key, label in SETTING_LABELS.items():
-        kb.button(text=f"{label}: {values.get(key, '')}", callback_data=Adm(action="set", arg=key))
-    kb.button(text="🔄 بارگذاری مجدد تعرفه‌ها", callback_data=Adm(action="reload_catalog"))
+        value = values.get(key, "")
+        if key == "welcome_text":
+            value = "سفارشی" if value else "پیش‌فرض"
+        kb.button(text=f"{label}: {value[:30]}", callback_data=Adm(action="set", arg=key))
+    mode = "با عضویت دوست" if values.get("referral_mode") == "join" else "بعد از اولین خرید دوست"
+    kb.button(text=f"🎁 شرط تخفیف دعوت: {mode}", callback_data=Adm(action="toggle_ref_mode"))
     kb.button(text="🔙 پنل مدیریت", callback_data=Adm(action="panel"))
     kb.adjust(1)
     return kb.as_markup()

@@ -20,7 +20,7 @@ class UserMiddleware(BaseMiddleware):
         if user is None or user.is_bot:
             return await handler(event, data)
 
-        await db.upsert_user(user.id, user.username, user.full_name)
+        data["is_new_user"] = await db.upsert_user(user.id, user.username, user.full_name)
         admin = await is_admin(user.id)
         if not admin:
             row = await db.get_user(user.id)

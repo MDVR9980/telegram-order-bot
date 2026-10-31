@@ -5,8 +5,7 @@ services:
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ./data:/app/data                   # database survives restarts/updates
-      - ./catalog.json:/app/catalog.json   # edit prices without rebuilding
+      - ./data:/app/data                   # database (orders, settings, prices) survives restarts/updates
     logging:
       driver: json-file
       options:

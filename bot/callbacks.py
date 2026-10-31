@@ -2,7 +2,7 @@ from aiogram.filters.callback_data import CallbackData
 
 
 class Pick(CallbackData, prefix="pick"):
-    field: str       # style | size | faces | delivery
+    field: str       # style | faces
     value: str
 
 
@@ -11,7 +11,7 @@ class Nav(CallbackData, prefix="nav"):
 
 
 class MyOrder(CallbackData, prefix="my"):
-    action: str      # view | pay | cancel | files | list
+    action: str      # view | pay | cancel | cancel_yes | files | list | receipt_for
     order_id: int = 0
 
 
