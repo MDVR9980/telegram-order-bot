@@ -4,11 +4,11 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
+from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault, ErrorEvent
 
 from .config import config
-from .context import db
+from .context import db, load_catalog
+from .storage import SQLiteStorage
 from .handlers import setup_routers
 from .middlewares import UserMiddleware
 from .utils import all_admin_ids
@@ -35,12 +35,28 @@ async def set_commands(bot: Bot) -> None:
             pass
 
 
+async def on_error(event: ErrorEvent) -> bool:
+    """Log unexpected errors and tell the user something went wrong instead of silently failing."""
+    logging.exception("Unhandled error: %s", event.exception, exc_info=event.exception)
+    update = event.update
+    try:
+        if update.callback_query:
+            await update.callback_query.answer("⚠️ خطایی رخ داد. لطفاً دوباره تلاش کنید.", show_alert=True)
+        elif update.message:
+            await update.message.answer("⚠️ خطایی رخ داد. لطفاً دوباره تلاش کنید یا /start را بزنید.")
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     await db.connect()
+    await load_catalog()
 
     bot = Bot(config.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = Dispatcher(storage=MemoryStorage())
+    dp = Dispatcher(storage=SQLiteStorage(db))
+    dp.errors.register(on_error)
     dp.message.outer_middleware(UserMiddleware())
     dp.callback_query.outer_middleware(UserMiddleware())
     dp.include_router(setup_routers())
