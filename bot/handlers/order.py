@@ -15,11 +15,15 @@ from ..utils import extract_file, fa, notify_admins, order_card_admin, order_lin
 
 router = Router(name="order")
 
-TOTAL_STEPS = 4
+def _single_style() -> bool:
+    """With only one visible type of work, the 'choose type' step is skipped."""
+    return len(catalog.styles) == 1
 
 
-def _progress(n: int) -> str:
-    return f"<b>مرحله {fa(n)} از {fa(TOTAL_STEPS)}</b>  " + "🟣" * n + "⚪️" * (TOTAL_STEPS - n)
+def _progress(step: str) -> str:
+    steps = ["faces", "photos", "description"] if _single_style() else ["style", "faces", "photos", "description"]
+    n, total = steps.index(step) + 1, len(steps)
+    return f"<b>مرحله {fa(n)} از {fa(total)}</b>  " + "🟣" * n + "⚪️" * (total - n)
 
 
 async def _show(target: Message, text: str, markup, edit: bool):
@@ -31,18 +35,22 @@ async def _show(target: Message, text: str, markup, edit: bool):
 
 # ---------- step renderers ----------
 async def ask_style(target: Message, edit: bool = False):
-    lines = [f"{_progress(1)}\n", "🎨 <b>چه نوع اثری</b> می‌خواهید؟\n"]
+    lines = [f"{_progress('style')}\n", await setting("art_spec") + "\n", "🎨 <b>چه نوع اثری</b> می‌خواهید؟\n"]
     lines += [f"▫️ <b>{s.title}</b>\n     <i>{s.description}</i>" for s in catalog.styles if s.description]
     await _show(target, "\n".join(lines), kb.options_kb("style", catalog.styles, with_back=False), edit)
 
 
 async def ask_faces(target: Message, edit: bool = False):
-    await _show(target, f"{_progress(2)}\n\n👤 <b>چند نفر</b> در نقاشی باشند؟", kb.options_kb("faces", catalog.faces), edit)
+    text = f"{_progress('faces')}\n\n"
+    if _single_style():
+        text += await setting("art_spec") + "\n\n"
+    text += "👤 <b>چند نفر</b> در نقاشی باشند؟"
+    await _show(target, text, kb.options_kb("faces", catalog.faces, with_back=not _single_style()), edit)
 
 
 def _photos_text() -> str:
     return (
-        f"{_progress(3)}\n\n"
+        f"{_progress('photos')}\n\n"
         f"📸 حالا <b>عکس یا عکس‌های مورد نظر</b> را بفرستید (حداکثر {fa(catalog.max_reference_photos)} عکس).\n\n"
         "💡 <i>هر چه عکس واضح‌تر و با نور بهتری باشد، نتیجه زیباتر می‌شود. "
         "برای حفظ کیفیت، بهتر است عکس را به صورت «فایل» ارسال کنید.</i>"
@@ -55,7 +63,7 @@ async def ask_photos(target: Message, count: int = 0, edit: bool = False):
 
 async def ask_description(target: Message, edit: bool = False):
     text = (
-        f"{_progress(4)}\n\n"
+        f"{_progress('description')}\n\n"
         "📝 اگر توضیح خاصی دارید بنویسید.\n"
         "<i>مثلاً: «پس‌زمینه ساده باشد»، «فقط چهره سمت راست»، «یک متن کوتاه پایین کار نوشته شود» و ...</i>"
     )
@@ -71,9 +79,18 @@ async def start_order(message: Message, state: FSMContext, is_admin: bool):
         )
         return
     await state.clear()
-    await state.set_state(OrderFlow.style)
     await message.answer("✨ بزن بریم! فقط چند قدم تا اثر هنری اختصاصی شما فاصله است.", reply_markup=kb.cancel_menu())
-    await ask_style(message)
+    await _begin(message, state)
+
+
+async def _begin(message: Message, state: FSMContext, edit: bool = False):
+    if _single_style():
+        await state.update_data(style=catalog.styles[0].id)
+        await state.set_state(OrderFlow.faces)
+        await ask_faces(message, edit=edit)
+    else:
+        await state.set_state(OrderFlow.style)
+        await ask_style(message, edit=edit)
 
 
 # ---------- picks ----------
@@ -105,8 +122,7 @@ async def pick_faces(call: CallbackQuery, callback_data: Pick, state: FSMContext
 # ---------- back ----------
 @router.callback_query(OrderFlow.faces, Nav.filter(F.action == "back"))
 async def back_to_style(call: CallbackQuery, state: FSMContext):
-    await state.set_state(OrderFlow.style)
-    await ask_style(call.message, edit=True)
+    await _begin(call.message, state, edit=True)
     await call.answer()
 
 
@@ -205,6 +221,8 @@ async def show_summary(message: Message, state: FSMContext, edit: bool = False):
         + [
             f"🖼 تعداد عکس: <b>{fa(len(data.get('photos', [])))}</b>",
             "",
+            await setting("art_spec"),
+            "",
             f"💡 قیمت بسته به حجم کار بین <b>{price_range()}</b> است و بعد از بررسی عکس‌ها برایتان ارسال می‌شود. "
             "تا قیمت را تایید و پرداخت نکنید، تعهدی ندارید.",
             "",
@@ -217,8 +235,7 @@ async def show_summary(message: Message, state: FSMContext, edit: bool = False):
 @router.callback_query(OrderFlow.confirm, Nav.filter(F.action == "edit"))
 async def edit_order(call: CallbackQuery, state: FSMContext):
     await state.set_data({})
-    await state.set_state(OrderFlow.style)
-    await ask_style(call.message, edit=True)
+    await _begin(call.message, state, edit=True)
     await call.answer("از اول شروع کنیم ✏️")
 
 
@@ -230,7 +247,8 @@ async def confirm_order(call: CallbackQuery, state: FSMContext, bot: Bot, is_adm
             return
         data = await state.get_data()
         await state.clear()
-    if not data.get("style") or not data.get("faces") or not data.get("photos"):
+    if not data.get("style") or not data.get("faces") or not data.get("photos") \
+            or not catalog.style(data["style"], include_hidden=True):
         await safe_edit(call.message, "⚠️ اطلاعات سفارش ناقص بود. لطفاً دوباره ثبت سفارش کنید.")
         await call.answer()
         return

@@ -396,7 +396,7 @@ async def opt_add(call: CallbackQuery, callback_data: Adm, state: FSMContext):
     await state.update_data(kind=callback_data.arg)
     await call.message.answer(
         "➕ عنوان گزینه جدید را بفرستید. اگر توضیح هم می‌خواهید، با | جدا کنید:\n"
-        "<code>🌸 نقاشی آبرنگ | رنگی و لطیف</code>",
+        "<code>🐾 طراحی حیوان خانگی | پرتره حیوان شما با مداد سیاه</code>",
         reply_markup=kb.abort_kb(),
     )
     await call.answer()

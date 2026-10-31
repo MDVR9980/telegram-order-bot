@@ -10,6 +10,7 @@ DEFAULT_SETTINGS = {
     "support_username": config.support_username,
     "channel_url": config.channel_url,
     "welcome_text": "",           # empty = built-in welcome text
+    "art_spec": "✏️ همه آثار با <b>مداد سیاه</b> روی <b>برگ دفتر طراحی</b> و در <b>یک سایز ثابت</b> کشیده می‌شوند.",
     "card_number": "6037-0000-0000-0000",
     "card_holder": "نام صاحب حساب",
     "bank_name": "بانک ملی",

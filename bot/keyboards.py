@@ -313,6 +313,7 @@ SETTING_LABELS = {
     "support_username": "💬 آیدی پشتیبانی",
     "channel_url": "📢 لینک کانال",
     "welcome_text": "👋 متن خوش‌آمد",
+    "art_spec": "✏️ متن سبک و سایز",
 }
 
 
@@ -322,6 +323,8 @@ def settings_kb(values: dict[str, str]) -> InlineKeyboardMarkup:
         value = values.get(key, "")
         if key == "welcome_text":
             value = "سفارشی" if value else "پیش‌فرض"
+        elif key == "art_spec":
+            value = "ویرایش"
         kb.button(text=f"{label}: {value[:30]}", callback_data=Adm(action="set", arg=key))
     mode = "با عضویت دوست" if values.get("referral_mode") == "join" else "بعد از اولین خرید دوست"
     kb.button(text=f"🎁 شرط تخفیف دعوت: {mode}", callback_data=Adm(action="toggle_ref_mode"))

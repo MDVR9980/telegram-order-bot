@@ -535,8 +535,14 @@ async def set_start(call: CallbackQuery, callback_data: Adm, state: FSMContext):
     if callback_data.arg == "welcome_text":
         prompt = (
             "👋 متن خوش‌آمد جدید را بفرستید. می‌توانید از <b>بولد</b>، <i>ایتالیک</i> و ایموجی استفاده کنید.\n"
-            "به جای <code>{name}</code> اسم مشتری قرار می‌گیرد.\n"
+            "به جای <code>{name}</code> اسم مشتری و به جای <code>{art_spec}</code> متن سبک و سایز قرار می‌گیرد.\n"
             "برای برگشت به متن پیش‌فرض، فقط <code>-</code> بفرستید."
+        )
+    elif callback_data.arg == "art_spec":
+        prompt = (
+            "✏️ <b>متن سبک و سایز</b> (در خوش‌آمد، تعرفه‌ها، راهنما و ثبت سفارش نمایش داده می‌شود)\n\n"
+            f"متن فعلی:\n{current}\n\n"
+            "متن جدید را بفرستید، یا برای برگشت به پیش‌فرض فقط <code>-</code> بفرستید."
         )
     else:
         prompt = f"{kb.SETTING_LABELS[callback_data.arg]}\nمقدار فعلی: <code>{esc(current)}</code>\n\nمقدار جدید را بفرستید:"
@@ -551,6 +557,8 @@ async def set_value(message: Message, state: FSMContext):
     value = message.text.strip()[:200]
     if key == "welcome_text":
         value = "" if value == "-" else message.html_text[:3000]
+    elif key == "art_spec":
+        value = DEFAULT_SETTINGS["art_spec"] if value == "-" else message.html_text[:500]
     elif key == "support_username":
         value = value.lstrip("@").split("/")[-1]
         if not re.fullmatch(r"[A-Za-z0-9_]{4,32}", value):
