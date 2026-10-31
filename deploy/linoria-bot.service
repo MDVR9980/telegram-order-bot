@@ -1,0 +1,16 @@
+# systemd unit (alternative to Docker)
+# cp deploy/linoria-bot.service /etc/systemd/system/ && systemctl enable --now linoria-bot
+[Unit]
+Description=Linoria Art Studio Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/telegram-order-bot
+ExecStart=/opt/telegram-order-bot/.venv/bin/python -m bot
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

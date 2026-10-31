@@ -1,0 +1,14 @@
+services:
+  bot:
+    build: .
+    container_name: linoria-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data                   # database survives restarts/updates
+      - ./catalog.json:/app/catalog.json   # edit prices without rebuilding
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
